@@ -45,14 +45,57 @@ class TransformerBlockWithMoe(nn.Module):
 
 
 class CNNFeatureExtractor(nn.Module):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, in_channels, num_classes, input_size):
+            super().__init__()
+            
+            self.features = nn.Sequential(
+                nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),
+
+                nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),
+
+                nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+
+                nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.AdaptiveAvgPool2d(1)
+            )
+        
+            with torch.no_grad():
+                dummy = torch.zeros(1, in_channels, input_size, input_size)
+                out = self.features(dummy)
+                flatten_dim = out.numel()
+
+            # Classifier (MLP)
+            self.MLP = nn.Linear(flatten_dim, num_classes)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.MLP(x)
+        return x
 
 class CNNMoeTransformer(nn.Module):
     def __init__(self, input_dim, num_experts, hidden_dim, output_dim, k=2):
         super().__init__()
         # CNN to extract a feature vector from the image
-        self.feature_extractor = CNNFeatureExtractor()
+        input_image_size = 224
+        self.feature_extractor = CNNFeatureExtractor(input_dim,
+                                                     num_experts,
+                                                     input_image_size,
+                                                     input_image_size)
         # MoE block to process the feature vector
         self.transformer_block = TransformerBlockWithMoe(input_dim, 
                                                         num_experts, 
