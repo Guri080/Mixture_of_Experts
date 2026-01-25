@@ -1,6 +1,12 @@
 import torchvision
 import torchvision.nn as nn
 
+import torch
+import torch.nn as nn
+
+from dataloader import MedMNIST_2D_Datasets
+
+import torch.nn.functional as F
 
 class GatingFunc(nn.Module):
     def __init__(self, input_dims, num_experts, k=2):
@@ -16,7 +22,7 @@ class GatingFunc(nn.Module):
         # apply softmax to the scores of the topk experts to get weights
         gate_weights = F.softmax(topk_vals, dim=-1)
         # Create a sparse tensor with weights only for the top-k experts
-        sparse_gate_weights = torch.zero_like(logits).scatter(-1, topk_indicies, gate_weights)
+        sparse_gate_weights = torch.zeros_like(logits).scatter(-1, topk_indicies, gate_weights)
         
         return sparse_gate_weights
 
@@ -38,37 +44,32 @@ class SwinMoe(nn.Module):
         
         self.gating = GatingFunc(feature_dim, num_experts)
 
-        self.layer_norm = nn.LayerNorm(num_classes)
+        # self.layer_norm = nn.LayerNorm(num_classes)
 
         self.projections = nn.ModuleList([
             nn.Linear(expert_num_classes[i], final_num_classes)
-            for i in range(len(num_experts))
+            for i in range(num_experts)
         ])
 
     def forward(self, x):
         # get features
-        expert_features = []
         expert_outputs = []
 
+        with torch.no_grad():
+            features = self.experts[0].features(x)
         
-        for i, expert in enumerate(self.experts):
-            with torch.no_grad():
-                features = expert.features(x)
-            expert_features.append(features)
+        gate_weights = self.gating(features)
 
-            output = expert.head(features)
+        for i, expert in enumerate(self.experts):
+            output = expert(x)
             projected = self.projections[i](output)
             expert_outputs.append(projected)
-        
-        avg_features = torch.stack(expert_features, dim=0).mean(dim=0)
-        gate_weights = self.gating(avg_features)
-        
+
         expert_outputs = torch.stack(expert_outputs, dim=1)
         moe_output = (gate_weights.unsqueeze(-1) * expert_outputs).sum(dim=1)
 
-
         #load balancing
-        D_i = gate_weights.mean(dim=0)
+        D_i = (gate_weights > 0).float().mean(dim=0)
         load_balancing_loss = (D_i * torch.log(D_i + 1e-8)).sum()
 
         return moe_output, load_balancing_loss
@@ -105,15 +106,15 @@ class Trainer:
                 self.optimizer.step()
                 running_loss += loss.item()
                 total_acc += self.accuracy(outputs, labels)
-                total_prec += self.precision(outputs, labels)
-                total_recall += self.recall(outputs, labels)
+                # total_prec += self.precision(outputs, labels)
+                # total_recall += self.recall(outputs, labels)
                 total_f1 += self.f1(outputs, labels)
 
             # Compute epoch metrics
             epoch_loss = running_loss / len(self.train_loader)
             epoch_acc = total_acc / len(self.train_loader)
-            epoch_prec = total_prec / len(self.train_loader)
-            epoch_recall = total_recall / len(self.train_loader)
+            # epoch_prec = total_prec / len(self.train_loader)
+            # epoch_recall = total_recall / len(self.train_loader)
             epoch_f1 = total_f1 / len(self.train_loader)
 
             # Validation phase
@@ -135,14 +136,13 @@ class Trainer:
                 'train_loss': epoch_loss,
                 'val_loss': val_loss,
                 'accuracy': epoch_acc.item(),
-                'precision': epoch_prec.item(),
-                'recall': epoch_recall.item(),
+                # 'precision': epoch_prec.item(),
+                # 'recall': epoch_recall.item(),
                 'f1_score': epoch_f1.item()
             })
 
             print(f"Epoch [{epoch+1}/{self.epochs}], Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                  f"Accuracy: {epoch_acc:.4f}, Precision: {epoch_prec:.4f}, "
-                  f"Recall: {epoch_recall:.4f}, F1 Score: {epoch_f1:.4f}")
+                  f"Accuracy: {epoch_acc:.4f}, F1 Score: {epoch_f1:.4f}")
 
         print("Training complete.")
         self.save_metrics()
@@ -155,9 +155,9 @@ class Trainer:
         print(f"Metrics saved to {self.save_path}.")
 
 if __name__ == "__main__":
-    chest_path = ''
-    derma_path = ''
-    retina_path = ''
+    chest_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/chestmnist/best_model_chestmnist.pth'
+    retina_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
+    organs_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
 
     expert1 = torch.load(chest_path)
     expert2 = torch.load(derma_path)
@@ -171,10 +171,3 @@ if __name__ == "__main__":
         final_num_classes=2,
         k=2
     )
-
-    
-
-
-        
-
-
