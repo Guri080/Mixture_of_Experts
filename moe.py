@@ -1,12 +1,16 @@
 import torchvision
-import torchvision.nn as nn
-
+from torchmetrics import Accuracy, Precision, Recall, F1Score
 import torch
 import torch.nn as nn
+from torch.optim import Adam
+import torch.nn.functional as F
+
+import csv
 
 from dataloader import MedMNIST_2D_Datasets
 
-import torch.nn.functional as F
+import config
+
 
 class GatingFunc(nn.Module):
     def __init__(self, input_dims, num_experts, k=2):
@@ -58,6 +62,7 @@ class SwinMoe(nn.Module):
         with torch.no_grad():
             features = self.experts[0].features(x)
         
+        features = F.adaptive_avg_pool2d(features, (1, 1)).flatten(1)
         gate_weights = self.gating(features)
 
         for i, expert in enumerate(self.experts):
@@ -85,64 +90,66 @@ class Trainer:
         self.device = device
         self.save_path = save_path
         self.alpha = alpha
-        self.accuracy = Accuracy(task="multiclass", num_classes=config.NUM_CLASSES).to(device)
-        self.precision = Precision(task="multiclass", num_classes=config.NUM_CLASSES, average='macro').to(device)
-        self.recall = Recall(task="multiclass", num_classes=config.NUM_CLASSES, average='macro').to(device)
-        self.f1 = F1Score(task="multiclass", num_classes=config.NUM_CLASSES, average='macro').to(device)
+        self.accuracy = Accuracy(task="multilabel", num_classes=config.NUM_CLASSES).to(device)
+        self.precision = Precision(task="multilabel", num_classes=config.NUM_CLASSES, average='macro').to(device)
+        self.recall = Recall(task="multilabel", num_classes=config.NUM_CLASSES, average='macro').to(device)
+        self.f1 = F1Score(task="multilabel", num_classes=config.NUM_CLASSES, average='macro').to(device)
         self.metrics_history = []
 
-    def train(self):
+    def learn(self):
+        num_ds = len(self.train_loader)
         for epoch in range(self.epochs):
             self.model.train()
-            running_loss = 0.0
-            total_acc, total_prec, total_recall, total_f1 = 0.0, 0.0, 0.0, 0.0
-            for images, labels in self.train_loader:
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                self.optimizer.zero_grad()
-                outputs, load_balancing_loss = self.model(images)
-                loss = self.criterion(outputs, labels) + self.alpha * load_balancing_loss
-                loss.backward()
-                self.optimizer.step()
-                running_loss += loss.item()
-                total_acc += self.accuracy(outputs, labels)
-                # total_prec += self.precision(outputs, labels)
-                # total_recall += self.recall(outputs, labels)
-                total_f1 += self.f1(outputs, labels)
-
-            # Compute epoch metrics
-            epoch_loss = running_loss / len(self.train_loader)
-            epoch_acc = total_acc / len(self.train_loader)
-            # epoch_prec = total_prec / len(self.train_loader)
-            # epoch_recall = total_recall / len(self.train_loader)
-            epoch_f1 = total_f1 / len(self.train_loader)
-
-            # Validation phase
-            val_loss = 0.0
-            self.model.eval()
-            with torch.no_grad():
-                for images, labels in self.val_loader:
+            running_loss = [0.0] * num_ds
+            total_acc = [torch.tensor(0.0).to(self.device) for _ in range(num_ds)]
+            total_f1 = [torch.tensor(0.0).to(self.device) for _ in range(num_ds)]
+            epoch_loss, epoch_acc, epoch_f1 = [0.0] * num_ds, [0.0] * num_ds, [0.0] * num_ds
+            for i, loader in enumerate(self.train_loader):
+                for images, labels in loader:
                     images = images.to(self.device)
                     labels = labels.to(self.device)
-                    outputs, _ = self.model(images)
-                    loss = self.criterion(outputs, labels)
-                    val_loss += loss.item()
+                    self.optimizer.zero_grad()
+                    outputs, load_balancing_loss = self.model(images)
+                    loss = self.criterion(outputs, labels) + self.alpha * load_balancing_loss
+                    loss.backward()
+                    self.optimizer.step()
+                    running_loss[i] += loss.item()
+                    total_acc[i] += self.accuracy(outputs, labels)
+                    # total_prec += self.precision(outputs, labels)
+                    # total_recall += self.recall(outputs, labels)
+                    total_f1[i] += self.f1(outputs, labels)
 
-            val_loss /= len(self.val_loader)
+                # Compute epoch metrics
+                epoch_loss[i] = running_loss[i] / len(loader)
+                epoch_acc[i] = total_acc[i] / len(loader)
+                epoch_f1[i] = total_f1[i] / len(loader)
+
+            # Validation phase
+            self.model.eval()
+            with torch.no_grad():
+                val_loss = [0.0] * num_ds
+                for i, loader in enumerate(self.val_loader):
+                    for images, labels in loader:
+                        images = images.to(self.device)
+                        labels = labels.to(self.device)
+                        outputs, _ = self.model(images)
+                        loss = self.criterion(outputs, labels)
+                        val_loss[i] += loss.item()
+
+                    val_loss[i] /= len(loader)
 
             # Append metrics for this epoch
-            self.metrics_history.append({
-                'epoch': epoch + 1,
-                'train_loss': epoch_loss,
-                'val_loss': val_loss,
-                'accuracy': epoch_acc.item(),
-                # 'precision': epoch_prec.item(),
-                # 'recall': epoch_recall.item(),
-                'f1_score': epoch_f1.item()
-            })
-
-            print(f"Epoch [{epoch+1}/{self.epochs}], Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                  f"Accuracy: {epoch_acc:.4f}, F1 Score: {epoch_f1:.4f}")
+            for i in range(num_ds):
+                self.metrics_history.append({
+                    'dataset': i,
+                    'epoch': epoch + 1,
+                    'train_loss': epoch_loss[i],
+                    'val_loss': val_loss[i],
+                    'accuracy': epoch_acc[i].item() if hasattr(epoch_acc[i], 'item') else epoch_acc[i],
+                    'f1_score': epoch_f1[i].item() if hasattr(epoch_f1[i], 'item') else epoch_f1[i]
+                })
+                print(f"Dataset {i}, Epoch [{epoch+1}/{self.epochs}], Train Loss: {epoch_loss[i]:.4f}, Val Loss: {val_loss[i]:.4f}, "
+                    f"Accuracy: {epoch_acc[i]:.4f}, F1 Score: {epoch_f1[i]:.4f}")
 
         print("Training complete.")
         self.save_metrics()
@@ -160,14 +167,40 @@ if __name__ == "__main__":
     organs_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
 
     expert1 = torch.load(chest_path)
-    expert2 = torch.load(derma_path)
-    expert3 = torch.load(retina_path)
+    expert2 = torch.load(retina_path)
+    expert3 = torch.load(organs_path)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = SwinMoe(
         swin_experts=[expert1, expert2, expert3],
-        expert_num_classes=[],
-        final_num_classes=2,
+        expert_num_classes=[config.CHEST_CLASSES, 
+                            config.RETINA_CLASSES, 
+                            config.ORGANS_CLASSES],
+        final_num_classes= config.NUM_CLASSES,
         k=2
     )
+
+    chest_train_loader = MedMNIST_2D_Datasets('chestmnist', split='train')
+    retina_train_loader = MedMNIST_2D_Datasets('retinamnist', split='train')
+    organs_train_loader = MedMNIST_2D_Datasets('organsmnist', split='train')
+
+    chest_val_loader = MedMNIST_2D_Datasets('chestmnist', split='val')
+    retina_val_loader = MedMNIST_2D_Datasets('retinamnist', split='val')
+    organs_val_loader = MedMNIST_2D_Datasets('organsmnist', split='val')
+
+    criterion = torch.nn.BCEWithLogitsLoss()
+
+    optimizer = Adam(model.parameters(), lr=config.lr)
+    # (self, model, train_loader, val_loader, criterion, optimizer, epochs, device='cpu', save_path='main.csv', alpha=0.001):
+    machine = Trainer(model=model,
+                        train_loader=[chest_train_loader, retina_train_loader, organs_train_loader],
+                        val_loader=[chest_val_loader, retina_val_loader, organs_val_loader],
+                        criterion=criterion,
+                        optimizer=optimizer,
+                        epochs=config.epochs,
+                        device=device,
+                        save_path=config.save_path
+    )
+
+    machine.learn() 
