@@ -9,6 +9,9 @@ import csv
 
 from dataloader import MedMNIST_2D_Datasets
 
+from models import Swin_base
+
+from medmnist import INFO
 import config
 
 
@@ -162,45 +165,52 @@ class Trainer:
         print(f"Metrics saved to {self.save_path}.")
 
 if __name__ == "__main__":
-    chest_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/chestmnist/best_model_chestmnist.pth'
-    retina_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
-    organs_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
-
-    expert1 = torch.load(chest_path)
-    expert2 = torch.load(retina_path)
-    expert3 = torch.load(organs_path)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    all_dataset_name = ['chestmnist', 'retinamnist', 'organsmnist']
+    experts = []
+    all_class_num = []
+    for i, dataset in enumerate(all_dataset_name):
+        info = INFO[dataset]
+        n_channels = 3
+        n_classes = len(info['label'])
+        all_class_num.append(n_classes)
+        experts.append(Swin_base(n_channels, n_classes))
+
+    chest_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/chestmnist/best_model_chestmnist.pth'
+    retina_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/retinamnist/best_model_retinamnist.pth'  # Fixed
+    organs_path = '/home/gssodhi/comp_vis/experiments/MedMNIST2D/myModels/organsmnist/best_model_organsmnist.pth'
+
+    for i, filepath in enumerate([chest_path, retina_path, organs_path]):
+        experts[i].load_state_dict(torch.load(filepath, weights_only=False, map_location=device))
+
     model = SwinMoe(
-        swin_experts=[expert1, expert2, expert3],
-        expert_num_classes=[config.CHEST_CLASSES, 
-                            config.RETINA_CLASSES, 
-                            config.ORGANS_CLASSES],
-        final_num_classes= config.NUM_CLASSES,
+        swin_experts=experts,
+        expert_num_classes=all_class_num,
+        final_num_classes=sum(classes),
         k=2
     )
 
-    chest_train_loader = MedMNIST_2D_Datasets('chestmnist', split='train')
-    retina_train_loader = MedMNIST_2D_Datasets('retinamnist', split='train')
-    organs_train_loader = MedMNIST_2D_Datasets('organsmnist', split='train')
-
-    chest_val_loader = MedMNIST_2D_Datasets('chestmnist', split='val')
-    retina_val_loader = MedMNIST_2D_Datasets('retinamnist', split='val')
-    organs_val_loader = MedMNIST_2D_Datasets('organsmnist', split='val')
+    # loaders for all dataset
+    all_train_loader = []
+    all_val_loader = []
+    for ds in all_dataset_name:
+        all_train_loader.append(MedMNIST_2D_Datasets(ds, split='train'))
+        all_val_loader.append(MedMNIST_2D_Datasets(ds, split='val'))
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
     optimizer = Adam(model.parameters(), lr=config.lr)
-    # (self, model, train_loader, val_loader, criterion, optimizer, epochs, device='cpu', save_path='main.csv', alpha=0.001):
-    machine = Trainer(model=model,
-                        train_loader=[chest_train_loader, retina_train_loader, organs_train_loader],
-                        val_loader=[chest_val_loader, retina_val_loader, organs_val_loader],
-                        criterion=criterion,
-                        optimizer=optimizer,
-                        epochs=config.epochs,
-                        device=device,
-                        save_path=config.save_path
+
+    machine = Trainer(
+        model=model,
+        train_loader=all_train_loader,
+        val_loader=all_val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        epochs=config.epochs,
+        device=device,
+        save_path=config.save_path
     )
 
-    machine.learn() 
+    machine.learn()
